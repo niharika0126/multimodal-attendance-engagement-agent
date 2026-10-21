@@ -4,7 +4,7 @@ av
 
 numpy==2.2.6
 mediapipe==1.1.1
-opencv-contrib-python==5.0.0.93
+opencv-contrib-python-headless==5.0.0.93
 
 matplotlib
 librosa==0.11.0
