@@ -1,17 +1,31 @@
-
 import csv
-import time
 from datetime import datetime
 from pathlib import Path
-
+import time
 import numpy as np
-import sounddevice as sd
 
-OUTPUT_FILE = Path("output/live_audio_activity.csv")
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_FILE = BASE_DIR / "output" / "live_audio_activity.csv"
 SAMPLE_RATE = 16000
 WINDOW_SECONDS = 0.5
 
 OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+try:
+    import sounddevice as sd
+except Exception as e:
+    print(f"Error: sounddevice could not be imported: {e}")
+    print("Ensure PortAudio is installed on your operating system.")
+    raise SystemExit(1)
+
+# Check for input devices
+try:
+    devices = sd.query_devices()
+    default_input = sd.default.device[0]
+    if default_input is None or default_input < 0:
+        print("Warning: No default microphone device detected.")
+except Exception as e:
+    print(f"Warning checking audio devices: {e}")
 
 print("Live microphone recording started.")
 print("Speak normally. Press Ctrl+C to stop.")
@@ -42,7 +56,7 @@ try:
                 rms = float(np.sqrt(np.mean(audio ** 2)))
                 elapsed = time.monotonic() - start_time
 
-                # Provisional threshold; calibrate for your microphone.
+                # Provisional threshold; calibrate for your microphone
                 activity = "Detected" if rms >= 0.01 else "Low"
 
                 writer.writerow([

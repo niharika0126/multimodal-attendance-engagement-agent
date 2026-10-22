@@ -1,17 +1,17 @@
-
+import csv
+from pathlib import Path
 import librosa
 import numpy as np
-import csv
-import os
 
-audio_path = "output/sample_audio.wav"
-output_path = "output/audio_activity.csv"
+BASE_DIR = Path(__file__).resolve().parent
+audio_path = BASE_DIR / "output" / "sample_audio.wav"
+output_path = BASE_DIR / "output" / "audio_activity.csv"
 
-if not os.path.exists(audio_path):
-    print("Audio file not found. Extract audio first.")
-    raise SystemExit
+if not audio_path.exists():
+    print(f"Audio file not found at: {audio_path}. Place an audio recording or extract audio first.")
+    raise SystemExit(1)
 
-audio, sample_rate = librosa.load(audio_path, sr=None)
+audio, sample_rate = librosa.load(str(audio_path), sr=None)
 
 # Calculate sound energy in 0.5-second intervals
 window_size = int(sample_rate * 0.5)
@@ -19,7 +19,6 @@ results = []
 
 for start in range(0, len(audio), window_size):
     segment = audio[start:start + window_size]
-
     if len(segment) == 0:
         continue
 
@@ -28,21 +27,26 @@ for start in range(0, len(audio), window_size):
 
     results.append({
         "Timestamp (seconds)": round(timestamp, 2),
-        "RMS Energy": round(rms, 6)
+        "RMS Energy": round(rms, 6),
     })
+
+if not results:
+    print("No audio segments analyzed.")
+    raise SystemExit(1)
 
 # Use a relative threshold to estimate sound activity
 max_energy = max(row["RMS Energy"] for row in results)
 threshold = max(0.01, max_energy * 0.10)
 
-with open(output_path, "w", newline="") as file:
+output_path.parent.mkdir(parents=True, exist_ok=True)
+with open(output_path, "w", newline="", encoding="utf-8") as file:
     writer = csv.DictWriter(
         file,
         fieldnames=[
             "Timestamp (seconds)",
             "RMS Energy",
-            "Sound Activity"
-        ]
+            "Sound Activity",
+        ],
     )
     writer.writeheader()
 
@@ -53,7 +57,7 @@ with open(output_path, "w", newline="") as file:
                 "Detected"
                 if row["RMS Energy"] >= threshold
                 else "Low"
-            )
+            ),
         })
 
 active = sum(row["RMS Energy"] >= threshold for row in results)

@@ -1,4 +1,3 @@
-
 # Python virtual environment
 .venv/
 
@@ -6,15 +5,25 @@
 __pycache__/
 *.py[cod]
 
-# Personal recorded videos
+# Personal recorded videos and sample media
 videos/
+*.mp4
+*.mov
+*.avi
 
 # Generated analysis files
-*.csv
+output/*.csv
+output/*.wav
+
+# Streamlit secrets and local configuration
+.streamlit/secrets.toml
+
+# Backups and temporary files
+*_backup.py
+*.tmp
 
 # IDE and OS files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-*.wav
