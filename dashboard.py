@@ -296,6 +296,11 @@ if page == "📹 Live Classroom":
             key="live-face-detection",
             video_processor_factory=FaceDetectionProcessor,
             media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]}
+                ]
+            },
             async_processing=True,
         )
 
