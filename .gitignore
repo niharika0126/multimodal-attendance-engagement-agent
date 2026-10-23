@@ -12,8 +12,7 @@ videos/
 *.avi
 
 # Generated analysis files
-output/*.csv
-output/*.wav
+output/
 
 # Streamlit secrets and local configuration
 .streamlit/secrets.toml

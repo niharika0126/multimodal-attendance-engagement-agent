@@ -114,7 +114,7 @@ try:
                 ])
                 file.flush()
 
-                cv2.imshow("EduSense AI - Live Face Detection", frame)
+                cv2.imshow("ClassPulse AI - Live Face Detection", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
