@@ -342,7 +342,7 @@ def calculate_teaching_effectiveness(session: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_session_history() -> List[Dict[str, Any]]:
-    """Load completed session history from storage, bootstrapping from existing CSVs if needed."""
+    """Load completed session history from storage."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     sessions: List[Dict[str, Any]] = []
 
@@ -355,49 +355,15 @@ def load_session_history() -> List[Dict[str, Any]]:
         except Exception:
             sessions = []
 
-    # Auto-bootstrap from raw CSV files if history is empty
-    if not sessions:
-        face_rows = read_csv_file(SAMPLE_FACE_FILE) or read_csv_file(LIVE_FACE_FILE)
-        audio_rows = read_csv_file(AUDIO_FILE) or read_csv_file(LIVE_AUDIO_FILE)
-
-        if face_rows or audio_rows:
-            face_counts = [int(number(r.get("Face Count", 0))) for r in face_rows]
-            elapsed_times = [number(r.get("Timestamp (seconds)", r.get("Elapsed Seconds", 0))) for r in face_rows]
-            audio_energy = [number(r.get("RMS Energy", 0)) for r in audio_rows]
-            audio_detected = sum(1 for r in audio_rows if r.get("Sound Activity", "").strip().lower() == "detected")
-
-            total_f = len(face_counts)
-            f_with = sum(c > 0 for c in face_counts)
-            dur = max(elapsed_times, default=0.0)
-            p_ratio = (f_with / total_f * 100.0) if total_f else 0.0
-            a_ratio = (audio_detected / len(audio_rows) * 100.0) if audio_rows else 0.0
-
-            bootstrapped = {
-                "session_id": "session_bootstrap_001",
-                "session_name": "Classroom Orientation Baseline",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "duration_seconds": round(dur, 1),
-                "total_samples": total_f,
-                "avg_faces": round(sum(face_counts) / total_f, 1) if total_f else 0.0,
-                "peak_faces": max(face_counts, default=0),
-                "presence_ratio": round(p_ratio, 1),
-                "audio_intervals": len(audio_rows),
-                "active_audio_intervals": audio_detected,
-                "active_audio_ratio": round(a_ratio, 1),
-                "avg_rms": round(sum(audio_energy) / len(audio_energy), 4) if audio_energy else 0.0,
-                "max_rms": round(max(audio_energy, default=0.0), 4),
-                "data_source": "Demonstration Video Baseline",
-            }
-            score_info = calculate_teaching_effectiveness(bootstrapped)
-            bootstrapped["effectiveness_score"] = score_info["composite_score"]
-            sessions.append(bootstrapped)
-            save_session_record(bootstrapped)
-
     return sessions
 
 
-def save_session_record(record: Dict[str, Any]) -> None:
-    """Save a session record to both JSON history and CSV records."""
+def save_session_record(record: Dict[str, Any]) -> bool:
+    """Save a session record to both JSON history and CSV records.
+
+    Updates an existing record in place if session_id matches; appends otherwise.
+    Returns True on success, False on write failure.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     existing = []
     if SESSION_HISTORY_FILE.exists():
@@ -420,14 +386,91 @@ def save_session_record(record: Dict[str, Any]) -> None:
         with open(SESSION_HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(existing, f, indent=2)
     except Exception:
-        pass
+        return False
 
     # Save to export CSV as well
     try:
         df = pd.DataFrame(existing)
         df.to_csv(SESSION_CSV_FILE, index=False)
     except Exception:
-        pass
+        return False
+
+    return True
+
+
+def compile_live_session_record(
+    face_rows: Optional[List[Dict[str, Any]]] = None,
+    audio_rows: Optional[List[Dict[str, Any]]] = None,
+    session_name: Optional[str] = None,
+    session_id: Optional[str] = None,
+    data_source: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Compile captured live face and audio sample rows into a persistent session record.
+
+    Returns None if there are no captured samples (prevents inventing artificial data).
+    """
+    if face_rows is None:
+        face_rows = read_csv_file(LIVE_FACE_FILE)
+    if audio_rows is None:
+        audio_rows = read_csv_file(LIVE_AUDIO_FILE)
+
+    if not face_rows and not audio_rows:
+        return None
+
+    face_counts = [int(number(r.get("Face Count", 0))) for r in face_rows]
+    face_elapsed = [number(r.get("Elapsed Seconds", r.get("Timestamp (seconds)", 0))) for r in face_rows]
+    total_f = len(face_counts)
+    f_with = sum(c > 0 for c in face_counts)
+    p_ratio = (f_with / total_f * 100.0) if total_f else 0.0
+
+    audio_energy = [number(r.get("RMS Energy", 0)) for r in audio_rows]
+    audio_elapsed = [number(r.get("Elapsed Seconds", r.get("Timestamp (seconds)", 0))) for r in audio_rows]
+    a_det = sum(1 for r in audio_rows if str(r.get("Sound Activity", "")).strip().lower() == "detected")
+    a_ratio = (a_det / len(audio_rows) * 100.0) if audio_rows else 0.0
+
+    dur_s = max(face_elapsed + audio_elapsed, default=0.0)
+
+    # Derive deterministic session_id from first sample timestamp to prevent duplicates
+    if not session_id:
+        first_raw_ts = None
+        for r in (face_rows + audio_rows):
+            ts = r.get("Timestamp")
+            if ts:
+                first_raw_ts = str(ts)
+                break
+        if first_raw_ts:
+            digits = "".join(c for c in first_raw_ts if c.isdigit())[:14]
+            session_id = f"sess_{digits}" if len(digits) >= 8 else f"sess_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        else:
+            session_id = f"sess_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    if not session_name or not session_name.strip():
+        session_name = f"Lecture {datetime.now().strftime('%b %d, %H:%M')}"
+    else:
+        session_name = session_name.strip()
+
+    if not data_source:
+        data_source = "Live Webcam & Microphone Session"
+
+    record = {
+        "session_id": session_id,
+        "session_name": session_name,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "duration_seconds": round(dur_s, 1),
+        "total_samples": total_f,
+        "avg_faces": round(sum(face_counts) / total_f, 1) if total_f else 0.0,
+        "peak_faces": max(face_counts, default=0),
+        "presence_ratio": round(p_ratio, 1),
+        "audio_intervals": len(audio_rows),
+        "active_audio_intervals": a_det,
+        "active_audio_ratio": round(a_ratio, 1),
+        "avg_rms": round(sum(audio_energy) / len(audio_energy), 4) if audio_energy else 0.0,
+        "max_rms": round(max(audio_energy, default=0.0), 4),
+        "data_source": data_source,
+    }
+    score_info = calculate_teaching_effectiveness(record)
+    record["effectiveness_score"] = score_info["composite_score"]
+    return record
 
 
 def generate_pdf_report(session: Dict[str, Any], all_sessions: List[Dict[str, Any]]) -> bytes:
@@ -762,6 +805,23 @@ class AudioRMSProcessor(AudioProcessorBase):
                         self.last_logged = now
                     except OSError:
                         pass
+            # Return a silent audio frame to prevent speaker audio feedback
+            # while satisfying WebRTC's pull-pipeline to ensure recv() continues running.
+            try:
+                silent_frame = av.AudioFrame.from_ndarray(
+                    np.zeros_like(samples),
+                    format=frame.format.name,
+                    layout=frame.layout.name,
+                )
+                if frame.sample_rate:
+                    silent_frame.sample_rate = frame.sample_rate
+                if frame.pts is not None:
+                    silent_frame.pts = frame.pts
+                if frame.time_base is not None:
+                    silent_frame.time_base = frame.time_base
+                return silent_frame
+            except Exception:
+                return frame
         except Exception as err:
             with self.lock:
                 self.last_error = str(err)
@@ -952,7 +1012,7 @@ st.markdown("""
     color: #e2e8f0;
 }
 .block-container {
-    padding-top: 1.0rem;
+    padding-top: 4.0rem;
     padding-bottom: 2.5rem;
     max-width: 1440px;
 }
@@ -1117,6 +1177,12 @@ st.sidebar.markdown(f"## 🎓 {APP_NAME}")
 st.sidebar.caption(APP_TAGLINE)
 st.sidebar.divider()
 
+def navigate_to_page(page_name: str) -> None:
+    """Callback to synchronize navigation session state before widget instantiation."""
+    st.session_state["nav_page"] = page_name
+    st.session_state["sidebar_nav_radio"] = page_name
+
+
 if "nav_page" not in st.session_state:
     st.session_state["nav_page"] = "📹 Live Classroom"
 
@@ -1154,9 +1220,20 @@ st.sidebar.caption(
 @st.fragment(run_every=2)
 def render_live_metrics_fragment(ctx, live_mode_active: bool):
     """Auto-refreshing fragment that updates timer, presence, and audio metrics live without page reload."""
+    # Status indicator
+    is_playing = bool(ctx and getattr(ctx.state, "playing", False))
+
     live_rows = read_csv_file(LIVE_FACE_FILE)
     sample_rows = read_csv_file(SAMPLE_FACE_FILE)
-    face_rows = live_rows if live_rows else sample_rows
+    live_audio_rows = read_csv_file(LIVE_AUDIO_FILE)
+    audio_rows = read_csv_file(AUDIO_FILE)
+
+    if live_mode_active:
+        face_rows = live_rows if is_playing else []
+        aud_rows = live_audio_rows if is_playing else []
+    else:
+        face_rows = live_rows if live_rows else sample_rows
+        aud_rows = live_audio_rows if live_audio_rows else audio_rows
 
     face_counts = [int(number(r.get("Face Count", 0))) for r in face_rows]
     elapsed_times = [number(r.get("Elapsed Seconds", r.get("Timestamp (seconds)", 0))) for r in face_rows]
@@ -1168,31 +1245,34 @@ def render_live_metrics_fragment(ctx, live_mode_active: bool):
     presence_ratio = (frames_with_face / total_frames * 100.0) if total_frames else 0.0
     elapsed_s = max(elapsed_times, default=0.0)
 
-    # Audio metrics
-    live_audio_rows = read_csv_file(LIVE_AUDIO_FILE)
-    audio_rows = read_csv_file(AUDIO_FILE)
-    aud_rows = live_audio_rows if live_audio_rows else audio_rows
+    mins = int(elapsed_s // 60)
+    secs = int(elapsed_s % 60)
+    timer_str = f"{mins:02d}:{secs:02d}"
+
     audio_energy = [number(r.get("RMS Energy", 0)) for r in aud_rows]
     curr_rms = audio_energy[-1] if audio_energy else 0.0
     audio_detected = sum(1 for r in aud_rows if r.get("Sound Activity", "").strip().lower() == "detected")
     audio_ratio = (audio_detected / len(aud_rows) * 100.0) if aud_rows else 0.0
 
     # Determine audio context category
-    if curr_rms >= 0.04:
-        audio_state = "Active Group Discussion"
+    if live_mode_active and not is_playing:
+        audio_state = "Microphone inactive"
+        audio_pill = "status-pill-warn"
+    elif live_mode_active and not live_audio_rows:
+        audio_state = "No live audio data"
+        audio_pill = "status-pill-warn"
+    elif not aud_rows:
+        audio_state = "Microphone inactive"
+        audio_pill = "status-pill-warn"
+    elif curr_rms >= 0.04:
+        audio_state = "High Sound Level"
         audio_pill = "status-pill-ok"
     elif curr_rms >= 0.015:
-        audio_state = "Moderate Lecture / Dialogue"
+        audio_state = "Moderate Sound Level"
         audio_pill = "status-pill-info"
     else:
-        audio_state = "Quiet / Independent Focus"
+        audio_state = "Low Sound Level"
         audio_pill = "status-pill-warn"
-
-    # Status indicator
-    is_playing = bool(ctx and getattr(ctx.state, "playing", False))
-    mins = int(elapsed_s // 60)
-    secs = int(elapsed_s % 60)
-    timer_str = f"{mins:02d}:{secs:02d}"
 
     st.markdown("#### ⚡ Live Classroom Metrics")
 
@@ -1218,7 +1298,7 @@ def render_live_metrics_fragment(ctx, live_mode_active: bool):
             <div class="{audio_pill}">{audio_state}</div>
         </div>
         <div style="font-size: 20px; font-weight: 700; color: #ffffff;">RMS: {curr_rms:.4f}</div>
-        <div class="small-note">Discussion interval ratio: {audio_ratio:.1f}% ({audio_detected}/{len(aud_rows)})</div>
+        <div class="small-note">Sound activity ratio: {audio_ratio:.1f}% ({audio_detected}/{len(aud_rows)})</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1291,7 +1371,9 @@ if st.session_state["nav_page"] == "📹 Live Classroom":
                     media_stream_constraints=constraints,
                     async_processing=True,
                     sendback_video=True,
-                    sendback_audio=False,  # Prevents speaker audio feedback loop!
+                    sendback_audio=bool(enable_mic),
+                    video_html_attrs={"autoPlay": True, "controls": True, "style": {"width": "100%"}, "muted": True},
+                    audio_html_attrs={"autoPlay": True, "controls": False, "muted": True},
                 )
 
                 # Stream status badge
@@ -1307,6 +1389,53 @@ if st.session_state["nav_page"] == "📹 Live Classroom":
                     )
                 else:
                     st.caption("Click **START** above to begin live webcam and microphone capture.")
+
+                # Live Session Archive Action Bar (Near Live Controls)
+                st.markdown('<div style="margin-top: 10px; margin-bottom: 6px;">', unsafe_allow_html=True)
+                col_top_lbl, col_top_act = st.columns([1.4, 1])
+                with col_top_lbl:
+                    top_live_session_label = st.text_input(
+                        "Session Title",
+                        value=f"Lecture {datetime.now().strftime('%b %d, %H:%M')}",
+                        key="top_live_session_label",
+                        label_visibility="collapsed",
+                        placeholder="Session Title (e.g. Lecture 1)",
+                    )
+                with col_top_act:
+                    stop_archive_clicked = st.button(
+                        "⏹️ Stop & Archive Session",
+                        key="btn_stop_and_archive_session",
+                        type="primary",
+                        width="stretch",
+                        help="Archive classroom metrics into Analytics & Reports and Teacher Central",
+                    )
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                if stop_archive_clicked:
+                    live_f = read_csv_file(LIVE_FACE_FILE)
+                    live_a = read_csv_file(LIVE_AUDIO_FILE)
+                    if not live_f and not live_a:
+                        st.warning("⚠️ No live session samples have been captured yet. Click START above to begin classroom capture before archiving.")
+                    else:
+                        rec = compile_live_session_record(
+                            face_rows=live_f,
+                            audio_rows=live_a,
+                            session_name=top_live_session_label,
+                        )
+                        if rec is not None:
+                            already_archived = st.session_state.get("last_saved_session_id") == rec["session_id"]
+                            saved = save_session_record(rec)
+                            if saved:
+                                st.session_state["last_saved_session_id"] = rec["session_id"]
+                                if already_archived:
+                                    st.success(f"✅ Session '{rec['session_name']}' updated in Analytics & Reports and Teacher Central!")
+                                else:
+                                    msg = f"✅ Session '{rec['session_name']}' successfully archived into Analytics & Reports and Teacher Central!"
+                                    if ctx and ctx.state.playing:
+                                        msg += " (Click STOP above if you are finished recording.)"
+                                    st.success(msg)
+                            else:
+                                st.error("❌ Failed to archive session to disk. Please check storage directory write permissions.")
 
         else:
             # Video Demonstration Fallback Engine
@@ -1355,14 +1484,21 @@ if st.session_state["nav_page"] == "📹 Live Classroom":
     # Read latest data for charts and tables
     live_rows = read_csv_file(LIVE_FACE_FILE)
     sample_rows = read_csv_file(SAMPLE_FACE_FILE)
-    face_rows = live_rows if live_rows else sample_rows
+    live_audio_rows = read_csv_file(LIVE_AUDIO_FILE)
+    audio_rows = read_csv_file(AUDIO_FILE)
+
+    is_stream_playing = bool(ctx and getattr(ctx.state, "playing", False))
+    if mode.startswith("📹"):
+        face_rows = live_rows if is_stream_playing else []
+        aud_rows = live_audio_rows if is_stream_playing else []
+    else:
+        face_rows = live_rows if live_rows else sample_rows
+        aud_rows = live_audio_rows if live_audio_rows else audio_rows
+
     face_counts = [int(number(r.get("Face Count", 0))) for r in face_rows]
     elapsed_times = [number(r.get("Elapsed Seconds", r.get("Timestamp (seconds)", 0))) for r in face_rows]
     face_timestamps = [r.get("Timestamp", str(r.get("Timestamp (seconds)", ""))) for r in face_rows]
 
-    live_audio_rows = read_csv_file(LIVE_AUDIO_FILE)
-    audio_rows = read_csv_file(AUDIO_FILE)
-    aud_rows = live_audio_rows if live_audio_rows else audio_rows
     audio_times = [number(r.get("Elapsed Seconds", r.get("Timestamp (seconds)", 0))) for r in aud_rows]
     audio_energy = [number(r.get("RMS Energy", 0)) for r in aud_rows]
 
@@ -1415,38 +1551,32 @@ if st.session_state["nav_page"] == "📹 Live Classroom":
     if face_rows or aud_rows:
         col_save1, col_save2 = st.columns([2, 1])
         with col_save1:
-            session_title_input = st.text_input("Session Label", value=f"Lecture {datetime.now().strftime('%b %d, %H:%M')}")
+            session_title_input = st.text_input(
+                "Session Label",
+                value=f"Lecture {datetime.now().strftime('%b %d, %H:%M')}",
+                key="bottom_session_label_input",
+            )
         with col_save2:
             st.write("")
             st.write("")
-            if st.button("💾 Save Session to Analytics & History", width="stretch"):
-                total_f = len(face_counts)
-                f_with = sum(c > 0 for c in face_counts)
-                p_ratio = (f_with / total_f * 100.0) if total_f else 0.0
-                a_det = sum(1 for r in aud_rows if r.get("Sound Activity", "").strip().lower() == "detected")
-                a_ratio = (a_det / len(aud_rows) * 100.0) if aud_rows else 0.0
-                dur_s = max(elapsed_times, default=0.0)
-
-                new_record = {
-                    "session_id": f"sess_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    "session_name": session_title_input,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "duration_seconds": round(dur_s, 1),
-                    "total_samples": total_f,
-                    "avg_faces": round(sum(face_counts) / total_f, 1) if total_f else 0.0,
-                    "peak_faces": max(face_counts, default=0),
-                    "presence_ratio": round(p_ratio, 1),
-                    "audio_intervals": len(aud_rows),
-                    "active_audio_intervals": a_det,
-                    "active_audio_ratio": round(a_ratio, 1),
-                    "avg_rms": round(sum(audio_energy) / len(audio_energy), 4) if audio_energy else 0.0,
-                    "max_rms": round(max(audio_energy, default=0.0), 4),
-                    "data_source": "Live Webcam & Microphone Session" if live_rows else "Demonstration Dataset",
-                }
-                sc_info = calculate_teaching_effectiveness(new_record)
-                new_record["effectiveness_score"] = sc_info["composite_score"]
-                save_session_record(new_record)
-                st.success(f"Session '{session_title_input}' successfully archived into Analytics & Reports and Teacher Central!")
+            if st.button("💾 Save Session to Analytics & History", width="stretch", key="btn_save_session_bottom"):
+                new_record = compile_live_session_record(
+                    face_rows=face_rows,
+                    audio_rows=aud_rows,
+                    session_name=session_title_input,
+                    data_source="Live Webcam & Microphone Session" if live_rows else "Demonstration Dataset",
+                )
+                if new_record is not None:
+                    already_archived = st.session_state.get("last_saved_session_id") == new_record["session_id"]
+                    saved = save_session_record(new_record)
+                    if saved:
+                        st.session_state["last_saved_session_id"] = new_record["session_id"]
+                        if already_archived:
+                            st.success(f"Session '{session_title_input}' updated in Analytics & Reports and Teacher Central!")
+                        else:
+                            st.success(f"Session '{session_title_input}' successfully archived into Analytics & Reports and Teacher Central!")
+                    else:
+                        st.error("Failed to archive session to disk. Please check directory permissions.")
 
     # Live Leaderboard & Suggestions Area
     st.divider()
@@ -1572,9 +1702,13 @@ elif st.session_state["nav_page"] == "📊 Analytics & Reports":
         st.caption("Historical classroom intelligence, session audits, and vector PDF reports.")
     with top_c2:
         st.write("")
-        if st.button("⬅️ Back to Live Dashboard", width="stretch"):
-            st.session_state["nav_page"] = "📹 Live Classroom"
-            st.rerun()
+        st.button(
+            "⬅️ Back to Live Dashboard",
+            on_click=navigate_to_page,
+            args=("📹 Live Classroom",),
+            key="back_to_live_from_analytics",
+            width="stretch",
+        )
 
     st.divider()
     st.markdown("### 📈 Session Analytics")
@@ -1582,7 +1716,7 @@ elif st.session_state["nav_page"] == "📊 Analytics & Reports":
     all_sessions = load_session_history()
 
     if not all_sessions:
-        st.info("No recorded sessions found. Execute a live webcam session or run the video demonstration to log data.")
+        st.info("No session data available yet. Start a live classroom session or run a video demonstration to record analytics.")
     else:
         # Session Filter Selector
         session_names = ["All Recorded Sessions"] + [s.get("session_name", s.get("session_id", "Session")) for s in all_sessions]
@@ -1702,33 +1836,20 @@ else:
         st.caption("Pedagogical intelligence, teaching effectiveness evaluation, and actionable insights.")
     with top_c2:
         st.write("")
-        if st.button("⬅️ Back to Live Dashboard", width="stretch"):
-            st.session_state["nav_page"] = "📹 Live Classroom"
-            st.rerun()
+        st.button(
+            "⬅️ Back to Live Dashboard",
+            on_click=navigate_to_page,
+            args=("📹 Live Classroom",),
+            key="back_to_live_from_teacher_central",
+            width="stretch",
+        )
 
     st.divider()
-
-    # Teacher Profile Card
-    st.markdown("""
-    <div class="panel" style="padding: 16px 20px; background: linear-gradient(135deg, #13223f, #111d33);">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <div style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px;">INSTRUCTOR PROFILE</div>
-                <h3 style="margin: 4px 0 2px 0; color: #ffffff;">Dr. Sarah Mitchell, Ph.D.</h3>
-                <div style="font-size: 13px; color: #94a3b8;">Department of Computer Science & Educational Technology • Course: CS-104</div>
-            </div>
-            <div style="text-align: right;">
-                <div class="status-pill-ok">● VERIFIED INSTRUCTOR</div>
-                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Term: Fall 2026 • Room: 402-A</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
 
     all_sessions = load_session_history()
 
     if not all_sessions:
-        st.info("Insufficient session history. Completed classroom sessions will generate teaching effectiveness metrics.")
+        st.info("No session data available yet. Start a live classroom session or run a video demonstration to record analytics.")
     else:
         latest = all_sessions[-1]
         score_info = calculate_teaching_effectiveness(latest)
